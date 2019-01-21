@@ -219,7 +219,7 @@ namespace ACE.Server.Managers
             {
                 // armor tinkering
                 case MaterialType.Steel:
-                    target.ArmorLevel += 20;
+                    target.ArmorLevel += 220;
                     break;
                 case MaterialType.Alabaster:
                     target.ArmorModVsPierce = Math.Min((target.ArmorModVsPierce ?? 0) + 0.2f, 2.0f);
@@ -376,22 +376,22 @@ namespace ACE.Server.Managers
                 // weapon tinkering
 
                 case MaterialType.Iron:
-                    target.Damage += 1;
+                    target.Damage += 8;
                     break;
                 case MaterialType.Mahogany:
                     target.DamageMod += 0.04f;
                     break;
                 case MaterialType.Granite:
-                    target.DamageVariance *= 0.8f;
+                    target.DamageVariance *= 0.4f;
                     break;
                 case MaterialType.Oak:
                     target.WeaponTime = Math.Max(0, (target.WeaponTime ?? 0) - 50);
                     break;
                 case MaterialType.Brass:
-                    target.WeaponDefense += 0.01f;
+                    target.WeaponDefense += 0.05f;
                     break;
                 case MaterialType.Velvet:
-                    target.WeaponOffense += 0.01f;
+                    target.WeaponOffense += 0.05f;
                     break;
 
                 // only 1 imbue can be applied per piece of armor?
@@ -421,7 +421,7 @@ namespace ACE.Server.Managers
                     return;
             }
             // increase # of times tinkered
-            target.NumTimesTinkered++;
+            // target.NumTimesTinkered++;
         }
 
         public static void AddSpell(Player player, WorldObject target, SpellId spell, int difficulty = 25)
