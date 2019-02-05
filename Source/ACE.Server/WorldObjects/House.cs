@@ -210,6 +210,21 @@ namespace ACE.Server.WorldObjects
             if (player.Guid.Full == HouseOwner.Value)
                 return true;
 
+            // handle allegiance permissions
+            if (MonarchId != null && player.Allegiance != null && player.Allegiance.MonarchId == MonarchId)
+            {
+                if (storage)
+                {
+                    if (StorageAccess.Contains(new ObjectGuid(MonarchId.Value)))
+                        return true;
+                }
+                else
+                {
+                    if (Guests.ContainsKey(new ObjectGuid(MonarchId.Value)))
+                        return true;
+                }
+            }
+
             if (storage)
                 return StorageAccess.Contains(player.Guid);
             else
@@ -249,6 +264,9 @@ namespace ACE.Server.WorldObjects
 
             Biota.AddHousePermission(housePermission, BiotaDatabaseLock);
             ChangesDetected = true;
+
+            if (CurrentLandblock == null)
+                SaveBiotaToDatabase();
         }
 
         public void UpdateGuest(IPlayer guest, bool storage)
@@ -260,12 +278,18 @@ namespace ACE.Server.WorldObjects
 
             existing.Storage = storage;
             ChangesDetected = true;
+
+            if (CurrentLandblock == null)
+                SaveBiotaToDatabase();
         }
 
         public void RemoveGuest(IPlayer guest)
         {
             Biota.TryRemoveHousePermission(guest.Guid.Full, out var entity, BiotaDatabaseLock);
             ChangesDetected = true;
+
+            if (CurrentLandblock == null)
+                SaveBiotaToDatabase();
         }
 
         public HousePermission FindGuest(IPlayer guest)
@@ -322,6 +346,65 @@ namespace ACE.Server.WorldObjects
                 }
                 return _dungeonHouseGuid.Value;
             }
+        }
+
+        private House _rootHouse;
+
+        /// <summary>
+        /// For villas and mansions, the basement dungeons contain their own House weenie
+        /// This dungeon House needs to reference the main outdoor house for various operations,
+        /// such as returning the permissions list.
+        /// </summary>
+        public House RootHouse
+        {
+            get
+            {
+                // return cached value
+                if (_rootHouse != null)
+                    return _rootHouse;
+
+                // handle outdoor house weenies
+                if (!CurrentLandblock.IsDungeon)
+                {
+                    _rootHouse = this;
+                    return _rootHouse;
+                }
+
+                var biota = DatabaseManager.Shard.GetBiotasByWcid(WeenieClassId).FirstOrDefault(b => b.BiotaPropertiesPosition.FirstOrDefault(p => p.PositionType == (ushort)PositionType.Location).ObjCellId >> 16 != Location?.Landblock);
+                if (biota == null)
+                {
+                    Console.WriteLine($"{Name}.RootHouse: couldn't find root house for {WeenieClassId} on landblock {Location.Landblock:X8}");
+
+                    _rootHouse = this;
+                    return _rootHouse;
+                }
+
+                var location = biota.BiotaPropertiesPosition.FirstOrDefault(i => i.PositionType == (ushort)PositionType.Location);
+                if (location == null)
+                {
+                    Console.WriteLine($"{Name}.RootHouse: couldn't find root house location for {WeenieClassId} on landblock {Location.Landblock:X8}");
+
+                    _rootHouse = this;
+                    return _rootHouse;
+                }
+
+                var landblockId = new LandblockId(location.ObjCellId | 0xFFFF);
+
+                var loaded = LandblockManager.GetLandblock(landblockId, false, false, true);
+
+                return loaded.GetObject(new ObjectGuid(biota.Id)) as House;
+            }
+        }
+
+        public bool? GetAllegianceAccessLevel()
+        {
+            if (MonarchId == null)
+                return null;
+
+            if (!Guests.TryGetValue(new ObjectGuid(MonarchId.Value), out bool storage))
+                return null;
+
+            return storage;
         }
     }
 }

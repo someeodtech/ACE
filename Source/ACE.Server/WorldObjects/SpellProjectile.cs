@@ -251,10 +251,15 @@ namespace ACE.Server.WorldObjects
             // if player target, ensure matching PK status
             var targetPlayer = target as Player;
 
-            var checkPKStatusVsTarget = CheckPKStatusVsTarget(player, targetPlayer, Spell);
-            if (checkPKStatusVsTarget != null && checkPKStatusVsTarget == false)
+            var pkError = CheckPKStatusVsTarget(player, targetPlayer, Spell);
+            if (pkError != null)
             {
-                player.Session.Network.EnqueueSend(new GameEventWeenieError(player.Session, WeenieError.InvalidPkStatus));
+                if (player != null)
+                    player.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(player.Session, pkError[0], target.Name));
+
+                if (targetPlayer != null)
+                    targetPlayer.Session.Network.EnqueueSend(new GameEventWeenieErrorWithString(targetPlayer.Session, pkError[1], ProjectileSource.Name));
+
                 return;
             }
 
@@ -330,7 +335,17 @@ namespace ACE.Server.WorldObjects
             // critical hit
             var critical = GetWeaponMagicCritFrequencyModifier(source, attackSkill);
             if (ThreadSafeRandom.Next(0.0f, 1.0f) < critical)
-                criticalHit = true;
+            {
+                if (targetPlayer != null && targetPlayer.AugmentationCriticalDefense > 0)
+                {
+                    var scalar = sourcePlayer == null ? 0.25f : 0.05f;
+                    var protChance = targetPlayer.AugmentationCriticalDefense * scalar;
+                    if (ThreadSafeRandom.Next(0.0f, 1.0f) > protChance)
+                        criticalHit = true;
+                }
+                else
+                    criticalHit = true;
+            }
 
             bool isPVP = sourcePlayer != null && targetPlayer != null;
 
@@ -403,6 +418,7 @@ namespace ACE.Server.WorldObjects
             {
                 uint amount;
                 var percent = 0.0f;
+                var heritageMod = 1.0f;
                 var sneakAttackMod = 1.0f;
 
                 // handle life projectiles for stamina / mana
@@ -429,13 +445,15 @@ namespace ACE.Server.WorldObjects
                         // could sneak attack be applied to void DoTs?
                         sneakAttackMod = player.GetSneakAttackMod(target);
                         //Console.WriteLine("Magic sneak attack:  + sneakAttackMod);
-                        damage *= sneakAttackMod;
+                        heritageMod = player.GetHeritageBonus(WeaponType.Magic) ? 1.05f : 1.0f;
                     }
 
                     // DR / DRR applies for magic too?
-                    var damageRatingMod = Creature.GetRatingMod(ProjectileSource.EnchantmentManager.GetDamageRating());
+                    var damageRatingMod = Creature.AdditiveCombine(sneakAttackMod, heritageMod, Creature.GetRatingMod(ProjectileSource.EnchantmentManager.GetDamageRating()));
                     var damageResistRatingMod = Creature.GetNegativeRatingMod(target.EnchantmentManager.GetDamageResistRating());
                     damage *= damageRatingMod * damageResistRatingMod;
+
+                    //Console.WriteLine($"Damage rating: " + Creature.ModToRating(damageRatingMod));
 
                     percent = (float)damage / target.Health.MaxValue;
                     amount = (uint)-target.UpdateVitalDelta(target.Health, (int)-Math.Round(damage.Value));

@@ -11,6 +11,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 using log4net;
 
+using ACE.Database.Entity;
 using ACE.Database.Models.World;
 using ACE.Entity.Enum;
 using ACE.Entity.Enum.Properties;
@@ -80,7 +81,7 @@ namespace ACE.Database
         /// This will populate all sub collections except the following: LandblockInstances, PointsOfInterest<para />
         /// This will also update the weenie cache.
         /// </summary>
-        private Weenie GetWeenie(WorldDbContext context, uint weenieClassId)
+        public Weenie GetWeenie(WorldDbContext context, uint weenieClassId)
         {
             // Base properties for every weenie (ACBaseQualities)
             var weenie = context.Weenie
@@ -464,6 +465,7 @@ namespace ACE.Database
             using (var context = new WorldDbContext())
             {
                 return context.LandblockInstance
+                    .Include(r => r.LandblockInstanceLink)
                     .AsNoTracking()
                     .FirstOrDefault(r => r.Guid == guid);
             }
@@ -474,9 +476,23 @@ namespace ACE.Database
             using (var context = new WorldDbContext())
             {
                 return context.LandblockInstance
+                    .Include(r => r.LandblockInstanceLink)
                     .AsNoTracking()
                     .Where(i => i.WeenieClassId == wcid)
                     .ToList();
+            }
+        }
+
+        public List<HouseListResults> GetHousesAll()
+        {
+            using (var context = new WorldDbContext())
+            {
+                var query = from weenie in context.Weenie
+                            join winst in context.LandblockInstance on weenie.ClassId equals winst.WeenieClassId
+                            where weenie.Type == (int)WeenieType.SlumLord
+                            select new HouseListResults(weenie, winst);
+
+                return query.ToList();
             }
         }
 
@@ -505,6 +521,7 @@ namespace ACE.Database
                 return results;
             }
         }
+
 
         private readonly ConcurrentDictionary<string, PointsOfInterest> cachedPointsOfInterest = new ConcurrentDictionary<string, PointsOfInterest>();
 

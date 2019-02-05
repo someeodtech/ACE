@@ -53,7 +53,7 @@ namespace ACE.Server.WorldObjects
             if (!healer.Equals(target))
             {
                 // perform moveto
-                healer.CreateMoveToChain(target, out var thisMoveToChainNumber, (success) => DoHealMotion(healer, target, success));
+                healer.CreateMoveToChain(target, (success) => DoHealMotion(healer, target, success));
             }
             else
                 DoHealMotion(healer, target, true);
@@ -74,7 +74,7 @@ namespace ACE.Server.WorldObjects
             actionChain.AddAction(healer, () =>
             {
                 DoHealing(healer, target);
-                healer.Session.Network.EnqueueSend(new GameEventUseDone(healer.Session, WeenieError.None));
+                healer.SendUseDoneEvent();
             });
             actionChain.EnqueueChain();
         }

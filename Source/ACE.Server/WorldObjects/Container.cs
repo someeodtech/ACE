@@ -53,9 +53,6 @@ namespace ACE.Server.WorldObjects
 
             //CurrentMotionState = motionStateClosed; // What container defaults to open?
 
-            if (UseRadius < 2)
-                UseRadius = 2; // Until DoMoveTo (Physics, Indoor/Outside range variance) is smarter, use 2 is safest.
-
             var creature = this as Creature;
             if (creature == null)
                 GenerateContainList();
@@ -399,17 +396,12 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public override void ActOnUse(WorldObject wo)
         {
-            var player = wo as Player;
-            if (player == null) return;
+            if (!(wo is Player player))
+                return;
 
             if (!IsOpen)
             {
-                var rotateTime = player.Rotate(this);
-
-                var actionChain = new ActionChain();
-                actionChain.AddDelaySeconds(rotateTime);
-                actionChain.AddAction(this, () => Open(player));
-                actionChain.EnqueueChain();
+                Open(player);
             }
             else
             {
@@ -419,8 +411,6 @@ namespace ACE.Server.WorldObjects
                     Close(player);
 
                 // else error msg?
-
-                player.SendUseDoneEvent();
             }
         }
 
@@ -434,8 +424,6 @@ namespace ACE.Server.WorldObjects
 
             DoOnOpenMotionChanges();
 
-            player.Session.Network.EnqueueSend(new GameEventViewContents(player.Session, this));
-
             // send createobject for all objects in this container's inventory to player
             var itemsToSend = new List<GameMessage>();
             var woToExamine = new List<WorldObject>();
@@ -448,41 +436,50 @@ namespace ACE.Server.WorldObjects
             }
 
             player.Session.Network.EnqueueSend(itemsToSend.ToArray());
-            player.TrackInteractiveObjects(woToExamine);
 
-            player.SendUseDoneEvent();
+            player.Session.Network.EnqueueSend(new GameEventViewContents(player.Session, this));
         }
 
-        protected virtual void DoOnOpenMotionChanges()
+        protected virtual float DoOnOpenMotionChanges()
         {
+            return 0;
         }
 
-        public void Close(Player player)
+        public virtual void Close(Player player)
         {
             if (!IsOpen) return;
 
-            if (player != null)
+            var animTime = DoOnCloseMotionChanges();
+            var actionChain = new ActionChain();
+            actionChain.AddDelaySeconds(animTime / 2.0f);
+            actionChain.AddAction(this, () =>
             {
-                player.Session.Network.EnqueueSend(new GameEventCloseGroundContainer(player.Session, this));
+                IsOpen = false;
+                Viewer = 0;
 
-                // send deleteobject for all objects in this container's inventory to player
-                var itemsToSend = new List<GameMessage>();
+                if (player != null)
+                {
+                    player.Session.Network.EnqueueSend(new GameEventCloseGroundContainer(player.Session, this));
 
-                foreach (var item in Inventory.Values)
-                    itemsToSend.Add(new GameMessageDeleteObject(item));
+                    if (player.lastUsedContainerId == Guid)
+                        player.lastUsedContainerId = new ObjectGuid(0);
 
-                player.Session.Network.EnqueueSend(itemsToSend.ToArray());
-            }
+                    // send deleteobject for all objects in this container's inventory to player
+                    // this seems logical, but it bugs out the client for re-opening chests w/ respawned items
+                    /*var itemsToSend = new List<GameMessage>();
 
-            DoOnCloseMotionChanges();
+                    foreach (var item in Inventory.Values)
+                        itemsToSend.Add(new GameMessageDeleteObject(item));
 
-            Viewer = 0;
-
-            IsOpen = false;
+                    player.Session.Network.EnqueueSend(itemsToSend.ToArray());*/
+                }
+            });
+            actionChain.EnqueueChain();
         }
 
-        protected virtual void DoOnCloseMotionChanges()
+        protected virtual float DoOnCloseMotionChanges()
         {
+            return 0;
         }
 
         public virtual void Reset()

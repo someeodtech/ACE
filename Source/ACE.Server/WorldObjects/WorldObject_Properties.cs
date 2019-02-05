@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 
+using ACE.Common;
 using ACE.Database;
 using ACE.Database.Models.Shard;
 using ACE.DatLoader;
@@ -1212,13 +1213,13 @@ namespace ACE.Server.WorldObjects
             set { if (!value.HasValue) RemoveProperty(PropertyInt.HookPlacement); else SetProperty(PropertyInt.HookPlacement, value.Value); }
         }
 
-        public uint? Monarch
+        public uint? MonarchId
         {
             get => GetProperty(PropertyInstanceId.Monarch);
             set { if (!value.HasValue) RemoveProperty(PropertyInstanceId.Monarch); else SetProperty(PropertyInstanceId.Monarch, value.Value); }
         }
 
-        public uint? Patron
+        public uint? PatronId
         {
             get => GetProperty(PropertyInstanceId.Patron);
             set { if (!value.HasValue) RemoveProperty(PropertyInstanceId.Patron); else SetProperty(PropertyInstanceId.Patron, value.Value); }
@@ -1477,6 +1478,13 @@ namespace ACE.Server.WorldObjects
         // ========================================
         // =========== Other Properties ===========
         // ========================================
+
+        private double? resetTimestamp;
+        protected double? ResetTimestamp
+        {
+            get { return resetTimestamp; }
+            set => resetTimestamp = Time.GetUnixTime();
+        }
 
         public int? Level
         {
@@ -2447,6 +2455,18 @@ namespace ACE.Server.WorldObjects
         {
             get => GetProperty(PropertyInt.ResistLockpick) ?? 0;
             set { if (!value.HasValue) RemoveProperty(PropertyInt.ResistLockpick); else SetProperty(PropertyInt.ResistLockpick, value.Value); }
+        }
+
+        public uint? VictimId
+        {
+            get => GetProperty(PropertyInstanceId.Victim);
+            set { if (!value.HasValue) RemoveProperty(PropertyInstanceId.Victim); else SetProperty(PropertyInstanceId.Victim, value.Value); }
+        }
+
+        public uint? KillerId
+        {
+            get => GetProperty(PropertyInstanceId.Killer);
+            set { if (!value.HasValue) RemoveProperty(PropertyInstanceId.Killer); else SetProperty(PropertyInstanceId.Killer, value.Value); }
         }
     }
 }

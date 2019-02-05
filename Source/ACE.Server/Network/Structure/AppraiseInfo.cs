@@ -104,7 +104,13 @@ namespace ACE.Server.Network.Structure
 
                     if (!PropertiesInt.ContainsKey(PropertyInt.AppraisalLockpickSuccessPercent))
                         PropertiesInt.Add(PropertyInt.AppraisalLockpickSuccessPercent, (int)lockpickSuccessPercent);
-                }
+                }                
+            }
+
+            if (wo is Portal)
+            {
+                if (PropertiesInt.ContainsKey(PropertyInt.EncumbranceVal))
+                    PropertiesInt.Remove(PropertyInt.EncumbranceVal);
             }
 
             BuildFlags();
@@ -129,10 +135,15 @@ namespace ACE.Server.Network.Structure
             if (PropertiesInt.ContainsKey(PropertyInt.ArmorLevel))
                 PropertiesInt[PropertyInt.ArmorLevel] += wo.EnchantmentManager.GetArmorMod();
 
-            if (wielder != null && PropertiesFloat.ContainsKey(PropertyFloat.WeaponDefense) && !(wo is Ammunition))
+            if (wo.ItemSkillLimit != null)
+                PropertiesInt[PropertyInt.AppraisalItemSkill] = (int)wo.ItemSkillLimit;
+
+            if (wielder == null || !wo.IsEnchantable) return;
+
+            if (PropertiesFloat.ContainsKey(PropertyFloat.WeaponDefense) && !(wo is Ammunition))
                 PropertiesFloat[PropertyFloat.WeaponDefense] += wielder.EnchantmentManager.GetDefenseMod();
 
-            if (wielder != null && PropertiesFloat.ContainsKey(PropertyFloat.ManaConversionMod))
+            if (PropertiesFloat.ContainsKey(PropertyFloat.ManaConversionMod))
             {
                 var manaConvMod = wielder.EnchantmentManager.GetManaConvMod();
                 if (manaConvMod != 1.0f)
@@ -144,7 +155,7 @@ namespace ACE.Server.Network.Structure
                 }
             }
 
-            if (wielder != null && PropertiesFloat.ContainsKey(PropertyFloat.ElementalDamageMod))
+            if (PropertiesFloat.ContainsKey(PropertyFloat.ElementalDamageMod))
             {
                 var elementalDamageMod = wielder.EnchantmentManager.GetElementalDamageMod();
                 if (elementalDamageMod != 0)
@@ -155,9 +166,6 @@ namespace ACE.Server.Network.Structure
                     ResistColor = ResistMaskHelper.GetColorMask(wielder);
                 }
             }
-
-            if (wo.ItemSkillLimit != null)
-                PropertiesInt[PropertyInt.AppraisalItemSkill] = (int)wo.ItemSkillLimit;
         }
 
         private void BuildSpells(WorldObject wo)
@@ -177,14 +185,14 @@ namespace ACE.Server.Network.Structure
 
         private void AddSpells(List<AppraisalSpellBook> activeSpells, WorldObject worldObject, WorldObject wielder = null)
         {
-            List<BiotaPropertiesEnchantmentRegistry> wielderEnchantments = null;
-            if (worldObject == null || !worldObject.IsEnchantable) return;
+            var wielderEnchantments = new List<BiotaPropertiesEnchantmentRegistry>();
+            if (worldObject == null) return;
 
             // get all currently active item enchantments on the item
             var woEnchantments = worldObject.EnchantmentManager.GetEnchantments(MagicSchool.ItemEnchantment);
 
             // get all currently active item enchantment auras on the player
-            if (wielder != null)
+            if (wielder != null && worldObject.IsEnchantable)
                 wielderEnchantments = wielder.EnchantmentManager.GetEnchantments(MagicSchool.ItemEnchantment);
 
             if (worldObject.WeenieType == WeenieType.Clothing || worldObject.IsShield)

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Numerics;
 using ACE.Database.Models.Shard;
 using ACE.Database.Models.World;
 using ACE.Entity;
@@ -10,6 +9,7 @@ using ACE.Entity.Enum.Properties;
 using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Factories;
+using ACE.Server.Network.GameEvent.Events;
 
 using log4net;
 
@@ -29,8 +29,12 @@ namespace ACE.Server.WorldObjects
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
-        private Dictionary<ObjectGuid, WorldObject> defaultItemsForSale = new Dictionary<ObjectGuid, WorldObject>();
-        private Dictionary<ObjectGuid, WorldObject> uniqueItemsForSale = new Dictionary<ObjectGuid, WorldObject>();
+        public Dictionary<ObjectGuid, WorldObject> DefaultItemsForSale = new Dictionary<ObjectGuid, WorldObject>();
+
+        // unique items purchased from other players
+        public Dictionary<ObjectGuid, WorldObject> UniqueItemsForSale = new Dictionary<ObjectGuid, WorldObject>();
+
+        public Dictionary<ObjectGuid, WorldObject> AllItemsForSale => DefaultItemsForSale.Concat(UniqueItemsForSale).ToDictionary(i => i.Key, i => i.Value);
 
         private bool inventoryloaded;
 
@@ -68,10 +72,13 @@ namespace ACE.Server.WorldObjects
             var player = wo as Player;
             if (player == null) return;
 
-            LoadInventory();
+            var rotateTime = Rotate(player);    // vendor rotates towards player
+
+            // TODO: remove this when DelayManager is not forward propagating current tick time
 
             var actionChain = new ActionChain();
-            var rotateTime = Rotate(player);    // vendor rotates towards player
+            actionChain.AddDelaySeconds(0.001f);  // force to run after rotate.EnqueueBroadcastAction
+            actionChain.AddAction(this, LoadInventory);
             actionChain.AddDelaySeconds(rotateTime);
             actionChain.AddAction(this, () => ApproachVendor(player, VendorType.Open));
             actionChain.EnqueueChain();
@@ -107,11 +114,39 @@ namespace ACE.Server.WorldObjects
                             wo.Shade = item.Shade;
                         wo.ContainerId = Guid.Full;
                         wo.CalculateObjDesc(); // i don't like firing this but this triggers proper icons, the way vendors load inventory feels off to me in this method.
-                        defaultItemsForSale.Add(wo.Guid, wo);
+                        DefaultItemsForSale.Add(wo.Guid, wo);
                     }
                 }
                 inventoryloaded = true;
             }
+        }
+
+        public void AddDefaultItem(WorldObject item)
+        {
+            var existing = GetDefaultItemsByWcid(item.WeenieClassId);
+
+            // add to existing stack?
+            if (existing.Count > 0)
+            {
+                var stackLeft = existing.FirstOrDefault(i => (i.StackSize ?? 1) < (i.MaxStackSize ?? 1));
+                if (stackLeft != null)
+                {
+                    stackLeft.StackSize = (stackLeft.StackSize ?? 1) + 1;
+                    return;
+                }
+            }
+
+            // create new item
+            item.ContainerId = Guid.Full;
+
+            item.CalculateObjDesc();
+
+            DefaultItemsForSale.Add(item.Guid, item);
+        }
+
+        public List<WorldObject> GetDefaultItemsByWcid(uint wcid)
+        {
+            return DefaultItemsForSale.Values.Where(i => i.WeenieClassId == wcid).ToList();
         }
 
         /// <summary>
@@ -120,9 +155,16 @@ namespace ACE.Server.WorldObjects
         private List<WorldObject> ItemProfileToWorldObjects(ItemProfile itemprofile)
         {
             List<WorldObject> worldobjects = new List<WorldObject>();
+
             while (itemprofile.Amount > 0)
             {
                 WorldObject wo = WorldObjectFactory.CreateNewWorldObject(itemprofile.WeenieClassId);
+
+                if (itemprofile.Palette.HasValue)
+                    wo.PaletteTemplate = itemprofile.Palette;
+                if (itemprofile.Shade.HasValue)
+                    wo.Shade = itemprofile.Shade;
+
                 // can we stack this ?
                 if (wo.MaxStackSize.HasValue)
                 {
@@ -161,25 +203,16 @@ namespace ACE.Server.WorldObjects
         /// <param name="action">The action performed by the player</param>
         private void ApproachVendor(Player player, VendorType action = VendorType.Undef)
         {
-            // default inventory
-            List<WorldObject> vendorlist = new List<WorldObject>();
+            var vendorList = AllItemsForSale.Values.ToList();
 
-            foreach (KeyValuePair<ObjectGuid, WorldObject> wo in defaultItemsForSale)
-                vendorlist.Add(wo.Value);
-
-            // unique inventory - items sold by other players
-            foreach (KeyValuePair<ObjectGuid, WorldObject> wo in uniqueItemsForSale)
-                vendorlist.Add(wo.Value);
-
-            player.TrackInteractiveObjects(vendorlist);
-            player.ApproachVendor(this, vendorlist);
+            player.Session.Network.EnqueueSend(new GameEventApproachVendor(player.Session, this, vendorList));
 
             var rotateTime = Rotate(player); // vendor rotates to player
 
             if (action != VendorType.Undef)
-            {
                 DoVendorEmote(action, player);
-            }
+
+            player.lastUsedContainerId = Guid;
         }
 
 
@@ -202,19 +235,21 @@ namespace ACE.Server.WorldObjects
             foreach (ItemProfile item in items)
             {
                 // check default items for id
-                if (defaultItemsForSale.ContainsKey(new ObjectGuid(item.ObjectGuid)))
+                if (DefaultItemsForSale.ContainsKey(new ObjectGuid(item.ObjectGuid)))
                 {
-                    item.WeenieClassId = defaultItemsForSale[new ObjectGuid(item.ObjectGuid)].WeenieClassId;
+                    item.WeenieClassId = DefaultItemsForSale[new ObjectGuid(item.ObjectGuid)].WeenieClassId;
+                    item.Palette = DefaultItemsForSale[new ObjectGuid(item.ObjectGuid)].PaletteTemplate;
+                    item.Shade = DefaultItemsForSale[new ObjectGuid(item.ObjectGuid)].Shade;
                     filteredlist.Add(item);
                 }
 
                 // check unique items / add unique items to purchaselist / remove from vendor list
-                if (uniqueItemsForSale.ContainsKey(new ObjectGuid(item.ObjectGuid)))
+                if (UniqueItemsForSale.ContainsKey(new ObjectGuid(item.ObjectGuid)))
                 {
-                    if (uniqueItemsForSale.TryGetValue(new ObjectGuid(item.ObjectGuid), out var wo))
+                    if (UniqueItemsForSale.TryGetValue(new ObjectGuid(item.ObjectGuid), out var wo))
                     {
                         uqlist.Add(wo);
-                        uniqueItemsForSale.Remove(new ObjectGuid(item.ObjectGuid));
+                        UniqueItemsForSale.Remove(new ObjectGuid(item.ObjectGuid));
                     }
                 }
             }
@@ -258,8 +293,8 @@ namespace ACE.Server.WorldObjects
             {
                 foreach (WorldObject wo in uqlist)
                 {
-                    if (!defaultItemsForSale.ContainsKey(wo.Guid))
-                        uniqueItemsForSale.Add(wo.Guid, wo);
+                    if (!DefaultItemsForSale.ContainsKey(wo.Guid))
+                        UniqueItemsForSale.Add(wo.Guid, wo);
                 }
             }
             ApproachVendor(player, VendorType.Buy);
@@ -297,7 +332,7 @@ namespace ACE.Server.WorldObjects
                     wo.CurrentWieldedLocation = null;
                     wo.Placement = ACE.Entity.Enum.Placement.Resting;
 
-                    uniqueItemsForSale.Add(wo.Guid, wo);
+                    UniqueItemsForSale.Add(wo.Guid, wo);
                 }
 
                 // remove object from shard db, but keep a reference to it in memory
@@ -353,6 +388,9 @@ namespace ACE.Server.WorldObjects
 
             if (dist > UseRadius)
             {
+                if (LastPlayer.lastUsedContainerId == Guid)
+                    LastPlayer.lastUsedContainerId = new ObjectGuid(0);
+
                 EmoteManager.DoVendorEmote(VendorType.Close, LastPlayer);
                 LastPlayer = null;
 

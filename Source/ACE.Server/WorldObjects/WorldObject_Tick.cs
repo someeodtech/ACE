@@ -1,10 +1,8 @@
 using System;
-using System.Numerics;
 
 using ACE.Common;
 using ACE.Entity;
 using ACE.Entity.Enum.Properties;
-using ACE.Server.Entity;
 using ACE.Server.Entity.Actions;
 using ACE.Server.Managers;
 using ACE.Server.Physics;
@@ -14,74 +12,96 @@ namespace ACE.Server.WorldObjects
 {
     partial class WorldObject
     {
-        private ActionQueue actionQueue;
-
-        public const int DefaultHeartbeatInterval = 5;
+        private const int heartbeatSpreadInterval = 5;
 
         protected double CachedHeartbeatInterval;
-        protected double NextHeartBeatTime;
-
-        private void InitializeTick()
-        {
-            CachedHeartbeatInterval = HeartbeatInterval ?? DefaultHeartbeatInterval;
-            QueueFirstHeartbeat(Time.GetUnixTime());
-        }
-
-        public virtual void Tick(double currentUnixTime)
-        {
-            if (actionQueue != null)
-                actionQueue.RunActions();
-
-            if (NextHeartBeatTime <= currentUnixTime)
-                HeartBeat(currentUnixTime);
-        }
-
-
         /// <summary>
-        /// Runs all actions pending on this WorldObject
+        /// A value of Double.MaxValue indicates that there is no NextHeartbeat
         /// </summary>
-        void IActor.RunActions()
-        {
-            if (actionQueue != null)
-                actionQueue.RunActions();
-        }
+        public double NextHeartbeatTime;
 
+        private double cachedRegenerationInterval;
         /// <summary>
-        /// Prepare new action to run on this object
+        /// A value of Double.MaxValue indicates that there is no NextGeneratorHeartbeat
         /// </summary>
-        public void EnqueueAction(IAction action)
+        public double NextGeneratorHeartbeatTime;
+
+        private void InitializeHeartbeats()
         {
-            if (actionQueue == null)
-                actionQueue = new ActionQueue();
+            var currentUnixTime = Time.GetUnixTime();
 
-            actionQueue.EnqueueAction(action);
-        }
+            CachedHeartbeatInterval = HeartbeatInterval ?? 0;
 
+            if (CachedHeartbeatInterval > 0)
+            {
+                // The intention of this code was just to spread the heartbeat ticks out a little over a 0-5s range,
+                var delay = ThreadSafeRandom.Next(0.0f, heartbeatSpreadInterval);
 
-        /// <summary>
-        /// Enqueues the first heartbeat on a staggered 0-5s delay
-        /// </summary>
-        public void QueueFirstHeartbeat(double currentUnixTime)
-        {
-            // The intention of this code was just to spread the heartbeat ticks out a little over a 0-5s range,
-            var delay = ThreadSafeRandom.Next(0.0f, DefaultHeartbeatInterval);
+                NextHeartbeatTime = currentUnixTime + delay;
+            }
+            else
+            {
+                NextHeartbeatTime = double.MaxValue; // Disable future HeartBeats
+            }
 
-            NextHeartBeatTime = currentUnixTime + delay;
+            cachedRegenerationInterval = RegenerationInterval;
+
+            if (IsGenerator)
+                NextGeneratorHeartbeatTime = currentUnixTime; // Generators start right away
+            else
+                NextGeneratorHeartbeatTime = double.MaxValue; // Disable future GeneratorHeartBeats
         }
 
         /// <summary>
         /// Called every ~5 seconds for WorldObject base
         /// </summary>
-        public virtual void HeartBeat(double currentUnixTime)
+        public virtual void Heartbeat(double currentUnixTime)
         {
-            if (IsGenerator)
-                Generator_HeartBeat();
-
             if (EnchantmentManager.HasEnchantments)
                 EnchantmentManager.HeartBeat();
 
             SetProperty(PropertyFloat.HeartbeatTimestamp, currentUnixTime);
-            NextHeartBeatTime = currentUnixTime + CachedHeartbeatInterval;
+            NextHeartbeatTime = currentUnixTime + CachedHeartbeatInterval;
+        }
+
+        /// <summary>
+        /// Called every [RegenerationInterval] seconds for WorldObject base
+        /// </summary>
+        public void GeneratorHeartbeat(double currentUnixTime)
+        {
+            Generator_HeartBeat();
+
+            if (cachedRegenerationInterval > 0)
+                NextGeneratorHeartbeatTime = currentUnixTime + cachedRegenerationInterval;
+            else
+                NextGeneratorHeartbeatTime = double.MaxValue;
+        }
+
+        /// <summary>
+        /// Enqueue work to be done on this objects Landblock..<para />
+        /// If this is a detached creature, the work will be discarded.<para />
+        /// If this is a detached non-creature object, the work will be enqueued onto WorldManager.
+        /// </summary>
+        public virtual void EnqueueAction(IAction action)
+        {
+            if (CurrentLandblock == null)
+            {
+                if (this is Creature)
+                {
+                    // If we've hit this point, something is asking to add work to a detached creature
+                    // It's likely a DelayManager processing a NextAct() action, and that action is likely an emote.
+                    // We don't need to emote Creatures.
+                    // If we find that there is a case where Creatures need to act after they've been detached from the landblock,
+                    // that work should be enqueued onto WorldManager
+                }
+                else
+                {
+                    // Enqueue work for detached objects onto our thread-safe WorldManager
+                    WorldManager.EnqueueAction(action);
+                }
+            }
+            else
+                CurrentLandblock.EnqueueAction(action);
         }
 
 
@@ -249,7 +269,7 @@ namespace ACE.Server.WorldObjects
             var spellProjectile = this as SpellProjectile;
             if (spellProjectile != null && spellProjectile.SpellType == SpellProjectile.ProjectileSpellType.Ring)
             {
-                var dist = Vector3.Distance(spellProjectile.SpawnPos.ToGlobal(), Location.ToGlobal());
+                var dist = spellProjectile.SpawnPos.DistanceTo(Location);
                 var maxRange = spellProjectile.Spell.BaseRangeConstant;
                 //Console.WriteLine("Max range: " + maxRange);
                 if (dist > maxRange)

@@ -128,7 +128,7 @@ namespace ACE.Entity
             var dy = Convert.ToSingle(Math.Cos(heading) * distanceInFront);
 
             // move the Z slightly up and let gravity pull it down.  just makes things easier.
-            var bumpHeight = 0.5f;
+            var bumpHeight = 0.05f;
             if (rotate180)
             {
                 var rotate = new Quaternion(0, 0, qz, qw) * Quaternion.CreateFromYawPitchRoll(0, 0, (float)Math.PI);
@@ -409,6 +409,28 @@ namespace ACE.Entity
                 var dx = (this.LandblockId.LandblockX - p.LandblockId.LandblockX) * 192 + this.PositionX - p.PositionX;
                 var dy = (this.LandblockId.LandblockY - p.LandblockId.LandblockY) * 192 + this.PositionY - p.PositionY;
                 return (float)Math.Sqrt(dx * dx + dy * dy);
+            }
+        }
+
+        /// <summary>
+        /// Returns the squared 2D distance between 2 objects
+        /// </summary>
+        public float Distance2DSquared(Position p)
+        {
+            // originally this returned the offset instead of distance...
+            if (p.LandblockId == this.LandblockId)
+            {
+                var dx = this.PositionX - p.PositionX;
+                var dy = this.PositionY - p.PositionY;
+                return dx * dx + dy * dy;
+            }
+            //if (p.LandblockId.MapScope == MapScope.Outdoors && this.LandblockId.MapScope == MapScope.Outdoors)
+            else
+            {
+                // verify this is working correctly if one of these is indoors
+                var dx = (this.LandblockId.LandblockX - p.LandblockId.LandblockX) * 192 + this.PositionX - p.PositionX;
+                var dy = (this.LandblockId.LandblockY - p.LandblockId.LandblockY) * 192 + this.PositionY - p.PositionY;
+                return dx * dx + dy * dy;
             }
         }
 

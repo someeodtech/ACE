@@ -33,7 +33,7 @@ namespace ACE.Server.Entity
     /// landblock goes from 0 to 192.  "indoor" (dungeon) landblocks have no
     /// functional limit as players can't freely roam in/out of them
     /// </summary>
-    public class Landblock
+    public class Landblock : IActor
     {
         private static readonly ILog log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -55,6 +55,14 @@ namespace ACE.Server.Entity
         private DateTime lastActiveTime;
 
         private readonly Dictionary<ObjectGuid, WorldObject> worldObjects = new Dictionary<ObjectGuid, WorldObject>();
+        private readonly Dictionary<ObjectGuid, WorldObject> pendingAdditions = new Dictionary<ObjectGuid, WorldObject>();
+        private readonly List<ObjectGuid> pendingRemovals = new List<ObjectGuid>();
+
+        // Cache used for Tick efficiency
+        private readonly List<Player> players = new List<Player>();
+        private readonly LinkedList<Creature> sortedCreaturesByNextTick = new LinkedList<Creature>();
+        private readonly LinkedList<WorldObject> sortedWorldObjectsByNextHeartbeat = new LinkedList<WorldObject>();
+        private readonly LinkedList<WorldObject> sortedGeneratorsByNextGeneratorHeartbeat = new LinkedList<WorldObject>();
 
         public List<Landblock> Adjacents = new List<Landblock>();
 
@@ -100,8 +108,10 @@ namespace ACE.Server.Entity
         public List<ModelMesh> Scenery { get; private set; }
 
 
-        public Landblock(LandblockId id)
+        public Landblock(LandblockId id, bool sync = false)
         {
+            //Console.WriteLine($"Loading landblock {(id.Raw | 0xFFFF):X8}");
+
             Id = id;
 
             CellLandblock = DatManager.CellDat.ReadFromDat<CellLandblock>(Id.Raw >> 16 | 0xFFFF);
@@ -109,18 +119,30 @@ namespace ACE.Server.Entity
 
             lastActiveTime = DateTime.UtcNow;
 
-            Task.Run(() =>
+            if (sync)
             {
-                _landblock = LScape.get_landblock(Id.Raw);
-
-                CreateWorldObjects();
-
-                SpawnDynamicShardObjects();
-
-                SpawnEncounters();
-            });
+                LoadLandblock(sync);
+            }
+            else
+            {
+                Task.Run(() => LoadLandblock(sync));
+            }
 
             //LoadMeshes(objects);
+        }
+
+        private void LoadLandblock(bool sync)
+        {
+            _landblock = LScape.get_landblock(Id.Raw);
+
+            if (sync)
+                CreateWorldObjects();
+            else
+                actionQueue.EnqueueAction(new ActionEventDelegate(CreateWorldObjects));
+
+            SpawnDynamicShardObjects();
+
+            SpawnEncounters();
         }
 
         /// <summary>
@@ -136,28 +158,25 @@ namespace ACE.Server.Entity
             // for mansion linking
             var houses = new List<House>();
 
-            actionQueue.EnqueueAction(new ActionEventDelegate(() =>
+            foreach (var fo in factoryObjects)
             {
-                foreach (var fo in factoryObjects)
+                WorldObject parent = null;
+                if (fo.WeenieType == WeenieType.House && fo.HouseType == HouseType.Mansion)
                 {
-                    WorldObject parent = null;
-                    if (fo.WeenieType == ACE.Entity.Enum.WeenieType.House && fo.HouseType == ACE.Entity.Enum.HouseType.Mansion)
+                    var house = fo as House;
+                    houses.Add(house);
+                    house.LinkedHouses.Add(houses[0]);
+
+                    if (houses.Count > 1)
                     {
-                        var house = fo as House;
-                        houses.Add(house);
-                        house.LinkedHouses.Add(houses[0]);
-
-                        if (houses.Count > 1)
-                        {
-                            houses[0].LinkedHouses.Add(house);
-                            parent = houses[0];
-                        }
+                        houses[0].LinkedHouses.Add(house);
+                        parent = houses[0];
                     }
-
-                    AddWorldObject(fo);
-                    fo.ActivateLinks(objects, shardObjects, parent);
                 }
-            }));
+
+                AddWorldObject(fo);
+                fo.ActivateLinks(objects, shardObjects, parent);
+            }
         }
 
         /// <summary>
@@ -276,19 +295,73 @@ namespace ACE.Server.Entity
         {
             actionQueue.RunActions();
 
-            var wos = worldObjects.Values.ToList();
+            ProcessPendingWorldObjectAdditionsAndRemovals();
 
             // When a WorldObject Ticks, it can end up adding additional WorldObjects to this landblock
-            foreach (var wo in wos)
-                wo.Tick(currentUnixTime);
+
+            foreach (var player in players)
+                player.Player_Tick(currentUnixTime);
+
+            while (sortedCreaturesByNextTick.Count > 0) // Monster_Tick()
+            {
+                var first = sortedCreaturesByNextTick.First.Value;
+
+                // If they wanted to run before or at now
+                if (first.NextMonsterTickTime <= currentUnixTime)
+                {
+                    sortedCreaturesByNextTick.RemoveFirst();
+                    first.Monster_Tick(currentUnixTime);
+                    sortedCreaturesByNextTick.AddLast(first); // All creatures tick at a fixed interval
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            while (sortedWorldObjectsByNextHeartbeat.Count > 0) // Heartbeat()
+            {
+                var first = sortedWorldObjectsByNextHeartbeat.First.Value;
+
+                // If they wanted to run before or at now
+                if (first.NextHeartbeatTime <= currentUnixTime)
+                {
+                    sortedWorldObjectsByNextHeartbeat.RemoveFirst();
+                    first.Heartbeat(currentUnixTime);
+                    InsertWorldObjectIntoSortedHeartbeatList(first); // WorldObjects can have heartbeats at different intervals
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            while (sortedGeneratorsByNextGeneratorHeartbeat.Count > 0) // GeneratorHeartbeat()
+            {
+                var first = sortedGeneratorsByNextGeneratorHeartbeat.First.Value;
+
+                // If they wanted to run before or at now
+                if (first.NextGeneratorHeartbeatTime <= currentUnixTime)
+                {
+                    sortedGeneratorsByNextGeneratorHeartbeat.RemoveFirst();
+                    first.GeneratorHeartbeat(currentUnixTime);
+                    InsertWorldObjectIntoSortedGeneratorHeartbeatList(first); // Generators can have heartbeats at different intervals
+                }
+                else
+                {
+                    break;
+                }
+            }
 
             // Heartbeat
             if (lastHeartBeat + heartbeatInterval <= DateTime.UtcNow)
             {
                 var thisHeartBeat = DateTime.UtcNow;
 
+                ProcessPendingWorldObjectAdditionsAndRemovals();
+
                 // Decay world objects
-                foreach (var wo in wos)
+                foreach (var wo in worldObjects.Values)
                 {
                     if (wo.IsDecayable())
                         wo.Decay(thisHeartBeat - lastHeartBeat);
@@ -303,9 +376,124 @@ namespace ACE.Server.Entity
             // Database Save
             if (lastDatabaseSave + databaseSaveInterval <= DateTime.UtcNow)
             {
+                ProcessPendingWorldObjectAdditionsAndRemovals();
+
                 SaveDB();
                 lastDatabaseSave = DateTime.UtcNow;
             }
+        }
+
+        private void ProcessPendingWorldObjectAdditionsAndRemovals()
+        {
+            if (pendingAdditions.Count > 0)
+            {
+                foreach (var kvp in pendingAdditions)
+                {
+                    worldObjects[kvp.Key] = kvp.Value;
+
+                    if (kvp.Value is Player player)
+                        players.Add(player);
+                    else if (kvp.Value is Creature creature)
+                        sortedCreaturesByNextTick.AddLast(creature);
+
+                    InsertWorldObjectIntoSortedHeartbeatList(kvp.Value);
+                    InsertWorldObjectIntoSortedGeneratorHeartbeatList(kvp.Value);
+                }
+
+                pendingAdditions.Clear();
+            }
+
+            if (pendingRemovals.Count > 0)
+            {
+                foreach (var objectGuid in pendingRemovals)
+                {
+                    if (worldObjects.Remove(objectGuid, out var wo))
+                    {
+                        if (wo is Player player)
+                            players.Remove(player);
+                        else if (wo is Creature creature)
+                            sortedCreaturesByNextTick.Remove(creature);
+
+                        sortedWorldObjectsByNextHeartbeat.Remove(wo);
+                        sortedGeneratorsByNextGeneratorHeartbeat.Remove(wo);
+                    }
+                }
+
+                pendingRemovals.Clear();
+            }
+        }
+
+        private void InsertWorldObjectIntoSortedHeartbeatList(WorldObject worldObject)
+        {
+            // If you want to add checks to exclude certain object types from heartbeating, you would do it here
+            if (worldObject.NextHeartbeatTime == double.MaxValue)
+                return;
+
+            if (sortedWorldObjectsByNextHeartbeat.Count == 0)
+            {
+                sortedWorldObjectsByNextHeartbeat.AddFirst(worldObject);
+                return;
+            }
+
+            if (sortedWorldObjectsByNextHeartbeat.Last.Value.NextHeartbeatTime <= worldObject.NextHeartbeatTime)
+            {
+                sortedWorldObjectsByNextHeartbeat.AddLast(worldObject);
+                return;
+            }
+
+            var currentNode = sortedWorldObjectsByNextHeartbeat.First;
+
+            while (currentNode != null)
+            {
+                if (worldObject.NextHeartbeatTime <= currentNode.Value.NextHeartbeatTime)
+                {
+                    sortedWorldObjectsByNextHeartbeat.AddBefore(currentNode, worldObject);
+                    return;
+                }
+
+                currentNode = currentNode.Next;
+            }
+
+            sortedWorldObjectsByNextHeartbeat.AddLast(worldObject); // This line really shouldn't be hit
+        }
+
+        private void InsertWorldObjectIntoSortedGeneratorHeartbeatList(WorldObject worldObject)
+        {
+            // If you want to add checks to exclude certain object types from heartbeating, you would do it here
+            if (worldObject.NextGeneratorHeartbeatTime == double.MaxValue)
+                return;
+
+            if (sortedGeneratorsByNextGeneratorHeartbeat.Count == 0)
+            {
+                sortedGeneratorsByNextGeneratorHeartbeat.AddFirst(worldObject);
+                return;
+            }
+
+            if (sortedGeneratorsByNextGeneratorHeartbeat.Last.Value.NextGeneratorHeartbeatTime <= worldObject.NextGeneratorHeartbeatTime)
+            {
+                sortedGeneratorsByNextGeneratorHeartbeat.AddLast(worldObject);
+                return;
+            }
+
+            var currentNode = sortedGeneratorsByNextGeneratorHeartbeat.First;
+
+            while (currentNode != null)
+            {
+                if (worldObject.NextGeneratorHeartbeatTime <= currentNode.Value.NextGeneratorHeartbeatTime)
+                {
+                    sortedGeneratorsByNextGeneratorHeartbeat.AddBefore(currentNode, worldObject);
+                    return;
+                }
+
+                currentNode = currentNode.Next;
+            }
+
+            sortedGeneratorsByNextGeneratorHeartbeat.AddLast(worldObject); // This line really shouldn't be hit
+        }
+
+        public void EnqueueAction(IAction action)
+        {
+            actionQueue.EnqueueAction(action);
         }
 
         private void AddPlayerTracking(List<WorldObject> wolist, Player player)
@@ -337,7 +525,8 @@ namespace ACE.Server.Entity
 
         private void AddWorldObjectInternal(WorldObject wo)
         {
-            worldObjects[wo.Guid] = wo;
+            pendingAdditions[wo.Guid] = wo;
+            pendingRemovals.Remove(wo.Guid);
 
             wo.CurrentLandblock = this;
 
@@ -385,14 +574,16 @@ namespace ACE.Server.Entity
         {
             //log.Debug($"LB {Id.Landblock:X}: removing {objectId.Full:X}");
 
-            worldObjects.Remove(objectId, out var wo);
+            if (!pendingAdditions.Remove(objectId, out var wo) && !worldObjects.TryGetValue(objectId, out wo))
+                return;
 
-            if (wo == null) return;
+            pendingRemovals.Add(objectId);
 
             wo.CurrentLandblock = null;
 
             // Weenies can come with a default of 0 or -1. If they still have that value, we want to retain it.
-            if (wo.TimeToRot.HasValue && wo.TimeToRot != 0 && wo.TimeToRot != -1)
+            // We also want to make sure fromPickup is true so that we're not clearing out TimeToRot on server shutdown (unloads all landblocks and removed all objects).
+            if (fromPickup && wo.TimeToRot.HasValue && wo.TimeToRot != 0 && wo.TimeToRot != -1)
                 wo.TimeToRot = null;
 
             if (!adjacencyMove)
@@ -422,32 +613,20 @@ namespace ACE.Server.Entity
         /// <summary>
         /// Returns landblock objects with physics initialized
         /// </summary>
-        public List<WorldObject> GetWorldObjectsForPhysicsHandling()
+        public ICollection<WorldObject> GetWorldObjectsForPhysicsHandling()
         {
             // If a missile is destroyed when it runs it's UpdateObjectPhysics(), it will remove itself from the landblock, thus, modifying the worldObjects collection.
-            return worldObjects.Values.ToList();
+
+            ProcessPendingWorldObjectAdditionsAndRemovals();
+
+            return worldObjects.Values;
         }
 
         public List<WorldObject> GetAllWorldObjectsForDiagnostics()
         {
+            // We do not ProcessPending here, and we return ToList() to avoid cross-thread issues.
+            // This can happen if we "loadalllandblocks" and do a "serverstatus".
             return worldObjects.Values.ToList();
-        }
-
-        /// <summary>
-        /// This will return null if the object was not found in the current or adjacent landblocks.
-        /// </summary>
-        private Landblock GetOwner(ObjectGuid guid)
-        {
-            if (worldObjects.ContainsKey(guid))
-                return this;
-
-            foreach (Landblock lb in Adjacents)
-            {
-                if (lb != null && lb.worldObjects.ContainsKey(guid))
-                    return lb;
-            }
-
-            return null;
         }
 
         public WorldObject GetObject(uint objectId)
@@ -460,12 +639,15 @@ namespace ACE.Server.Entity
         /// </summary>
         public WorldObject GetObject(ObjectGuid guid)
         {
-            if (worldObjects.TryGetValue(guid, out var worldObject))
+            if (pendingRemovals.Contains(guid))
+                return null;
+
+            if (worldObjects.TryGetValue(guid, out var worldObject) || pendingAdditions.TryGetValue(guid, out worldObject))
                 return worldObject;
 
             foreach (Landblock lb in Adjacents)
             {
-                if (lb != null && lb.worldObjects.TryGetValue(guid, out worldObject))
+                if (lb != null && !lb.pendingRemovals.Contains(guid) && (lb.worldObjects.TryGetValue(guid, out worldObject) || lb.pendingAdditions.TryGetValue(guid, out worldObject)))
                     return worldObject;
             }
 
@@ -547,6 +729,8 @@ namespace ACE.Server.Entity
 
             log.Debug($"Landblock.Unload({landblockID:X})");
 
+            ProcessPendingWorldObjectAdditionsAndRemovals();
+
             SaveDB();
 
             // remove all objects
@@ -563,7 +747,7 @@ namespace ACE.Server.Entity
 
             foreach (var wo in worldObjects.Values)
             {
-                if (wo.IsStaticThatShouldPersistToShard() || wo.IsDecayableThatShouldPersistToShard())
+                if (wo.IsStaticThatShouldPersistToShard() || wo.IsDynamicThatShouldPersistToShard())
                     AddWorldObjectToBiotasSaveCollection(wo, biotas);
             }
 

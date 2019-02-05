@@ -37,6 +37,8 @@ namespace ACE.Server.WorldObjects
 
         public bool LastContact = true;
 
+        public SquelchDB Squelches;
+
         /// <summary>
         /// A new biota be created taking all of its values from weenie.
         /// </summary>
@@ -137,6 +139,8 @@ namespace ACE.Server.WorldObjects
             LastUseTracker = new Dictionary<int, DateTime>();
 
             LootPermission = new Dictionary<ObjectGuid, DateTime>();
+
+            Squelches = new SquelchDB();
 
             return; // todo
             /* todo fix for new EF model
@@ -311,63 +315,38 @@ namespace ACE.Server.WorldObjects
 
         public MotionStance stance = MotionStance.NonCombat;
 
-        public void ExamineObject(uint examinationId)
+        public void ExamineObject(uint objectGuid)
         {
             // TODO: Throttle this request?. The live servers did this, likely for a very good reason, so we should, too.
 
-            if (examinationId == 0)
+            if (objectGuid == 0)
             {
                 // Deselect the formerly selected Target
                 // selectedTarget = ObjectGuid.Invalid;
                 RequestedAppraisalTarget = null;
                 CurrentAppraisalTarget = null;
+
+                SendUseDoneEvent();
                 return;
             }
 
-            // The object can be in two spots... on the player or on the landblock
-            // First check the player
-            // search packs
-            WorldObject wo = GetInventoryItem(examinationId);
-
-            // search wielded items
-            if (wo == null)
-                wo = GetEquippedItem(examinationId);
-
-            // search interactive objects
+            var wo = FindObject(objectGuid, SearchLocations.Everywhere, out Container foundInContainer, out Container rootOwner, out bool wasEquipped);
             if (wo == null)
             {
-                if (interactiveWorldObjects.ContainsKey(new ObjectGuid(examinationId)))
-                    wo = interactiveWorldObjects[new ObjectGuid(examinationId)];
+                // search creature equipped weapons on nearby landblocks
+                wo = CurrentLandblock?.GetWieldedObject(objectGuid);
             }
-
-            // if local, examine it
-            if (wo != null)
-                Examine(wo);
-            else
+            if (wo == null)
             {
-                // examine item on landblock
-                wo = CurrentLandblock?.GetObject(examinationId);
-                if (wo != null)
-                    Examine(wo);
-                else
-                {
-                    // search creature equipped weapons on nearby landblocks
-                    wo = CurrentLandblock?.GetWieldedObject(examinationId);
-                    if (wo != null)
-                        Examine(wo);
-                    else
-                    {
-                        // At this point, the object wasn't found.
-                        // It could be that the object was teleported away before this request was processed
-                        // It could also be a decal plugin requesting information for an object that is no longer in range
-
-                        //log.Warn($"{Name} tried to appraise object {examinationId.Full:X8}, couldn't find it");
-                    }
-                }
+                log.Warn($"{Name}.ExamineObject({objectGuid:X8}): couldn't find object");
+                SendUseDoneEvent();
+                return;
             }
 
-            RequestedAppraisalTarget = examinationId;
-            CurrentAppraisalTarget = examinationId;
+            RequestedAppraisalTarget = objectGuid;
+            CurrentAppraisalTarget = objectGuid;
+
+            Examine(wo);
         }
 
         public void Examine(WorldObject obj)
@@ -395,6 +374,22 @@ namespace ACE.Server.WorldObjects
 
             if (!success && player != null)
                 player.Session.Network.EnqueueSend(new GameMessageSystemChat($"{Name} tried and failed to assess you!", ChatMessageType.Appraisal));
+
+            // pooky logic - handle monsters attacking on appraisal
+            if (creature != null && creature.MonsterState == State.Idle)
+            {
+                var tolerance = (Tolerance)(creature.GetProperty(PropertyInt.Tolerance) ?? 0);
+                if (tolerance.HasFlag(Tolerance.Appraise))
+                {
+                    creature.AttackTarget = this;
+                    creature.WakeUp();
+                }
+            }
+        }
+
+        public override void OnCollideEnvironment()
+        {
+            //HandleFallingDamage();
         }
 
         public override void OnCollideObject(WorldObject target)
@@ -467,6 +462,39 @@ namespace ACE.Server.WorldObjects
                 CurrentLandblock?.GetObject(bookGuid).ReadBookPage(Session, pageNum);
             }
         }
+
+        public void HandleActionBookAddPage(uint bookGuid)
+        {
+            // find inventory book
+            var book = FindObject(new ObjectGuid(bookGuid), SearchLocations.MyInventory, out var container, out var rootOwner, out var wasEquipped) as Book;
+            if (book == null) return;
+
+            var page = book.AddPage(Guid.Full, Name, Session.Account, false, "");
+
+            if (page != null)
+                Session.Network.EnqueueSend(new GameEventBookAddPageResponse(Session, bookGuid, page.PageId, true));
+        }
+
+        public void HandleActionBookModifyPage(uint bookGuid, uint pageId, string pageText)
+        {
+            // find inventory book
+            var book = FindObject(new ObjectGuid(bookGuid), SearchLocations.MyInventory, out var container, out var rootOwner, out var wasEquipped) as Book;
+            if (book == null) return;
+
+            book.ModifyPage(pageId, pageText);
+        }
+
+        public void HandleActionBookDeletePage(uint bookGuid, uint pageId)
+        {
+            // find inventory book
+            var book = FindObject(new ObjectGuid(bookGuid), SearchLocations.MyInventory, out var container, out var rootOwner, out var wasEquipped) as Book;
+            if (book == null) return;
+
+            var success = book.DeletePage(pageId);
+
+            Session.Network.EnqueueSend(new GameEventBookDeletePageResponse(Session, bookGuid, pageId, success));
+        }
+
 
 
         /// <summary>
@@ -656,11 +684,17 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public void HandleActionForceObjDescSend(uint itemGuid)
         {
-            WorldObject wo = GetInventoryItem(new ObjectGuid(itemGuid));
-            if (wo != null)
-                EnqueueBroadcast(new GameMessageObjDescEvent(wo));
-            else
-                log.Debug($"HandleActionForceObjDescSend() - couldn't find inventory item {itemGuid:X8}");
+            var wo = FindObject(itemGuid, SearchLocations.Everywhere);
+            if (wo == null)
+            {
+                wo = CurrentLandblock?.GetWieldedObject(itemGuid);
+                if (wo == null)
+                {
+                    log.Debug($"HandleActionForceObjDescSend() - couldn't find object {itemGuid:X8}");
+                    return;
+                }
+            }
+            EnqueueBroadcast(new GameMessageObjDescEvent(wo));
         }
 
 
@@ -794,7 +828,7 @@ namespace ACE.Server.WorldObjects
 
         public void HandleActionTalk(string message)
         {
-            EnqueueBroadcast(new GameMessageCreatureMessage(message, Name, Guid.Full, ChatMessageType.Speech), LocalBroadcastRange);
+            EnqueueBroadcast(new GameMessageCreatureMessage(message, Name, Guid.Full, ChatMessageType.Speech), LocalBroadcastRange, true);
         }
 
         public void HandleActionEmote(string message)
@@ -809,6 +843,8 @@ namespace ACE.Server.WorldObjects
 
         public void HandleActionJump(JumpPack jump)
         {
+            StartJump = new ACE.Entity.Position(Location);
+
             var strength = Strength.Current;
             var capacity = EncumbranceSystem.EncumbranceCapacity((int)strength, 0);     // TODO: augs
             var burden = EncumbranceSystem.GetBurden(capacity, EncumbranceVal ?? 0);
@@ -1034,6 +1070,114 @@ namespace ACE.Server.WorldObjects
 
             });
             actionChain.EnqueueChain();
+        }
+
+        public void HandleActionModifyCharacterSquelch(bool squelch, uint playerGuid, string playerName, ChatMessageType messageType)
+        {
+            //Console.WriteLine($"{Name}.HandleActionModifyCharacterSquelch({squelch}, {playerGuid:X8}, {playerName}, {messageType})");
+
+            IPlayer player;
+
+            if (playerGuid != 0)
+            {
+                player = PlayerManager.FindByGuid(new ObjectGuid(playerGuid));
+
+                if (player == null)
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat("Couldn't find player to squelch.", ChatMessageType.Broadcast));
+                    return;
+                }
+            }
+            else
+            {
+                player = PlayerManager.FindByName(playerName);
+
+                if (player == null)
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"{playerName} not found.", ChatMessageType.Broadcast));
+                    return;
+                }
+            }
+
+            if (player.Guid == Guid)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat("You can't squelch yourself!", ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (squelch)
+            {
+                if (Squelches.Characters.ContainsKey(player.Guid))
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} is already squelched.", ChatMessageType.Broadcast));
+                    return;
+                }
+
+                Squelches.Characters.Add(player.Guid, new SquelchInfo(messageType, player.Name, false));
+
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} has been squelched.", ChatMessageType.Broadcast));
+            }
+            else
+            {
+                if (!Squelches.Characters.Remove(player.Guid))
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} is not squelched.", ChatMessageType.Broadcast));
+                    return;
+                }
+
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name} has been unsquelched.", ChatMessageType.Broadcast));
+            }
+
+            Session.Network.EnqueueSend(new GameEventSetSquelchDB(Session, Squelches));
+        }
+
+        public void HandleActionModifyAccountSquelch(bool squelch, string playerName)
+        {
+            //Console.WriteLine($"{Name}.HandleActionModifyAccountSquelch({squelch}, {playerName})");
+
+            var player = PlayerManager.GetOnlinePlayer(playerName);
+
+            if (player == null)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{playerName} not found.", ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (player.Guid == Guid)
+            {
+                Session.Network.EnqueueSend(new GameMessageSystemChat("You can't squelch yourself!", ChatMessageType.Broadcast));
+                return;
+            }
+
+            if (squelch)
+            {
+                if (Squelches.Accounts.ContainsKey(player.Session.Account))
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s account is already squelched.", ChatMessageType.Broadcast));
+                    return;
+                }
+
+                Squelches.Accounts.Add(player.Session.Account, player.Guid.Full);
+
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s account has been squelched.", ChatMessageType.Broadcast));
+            }
+            else
+            {
+                if (!Squelches.Accounts.Remove(player.Session.Account))
+                {
+                    Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s account is not squelched.", ChatMessageType.Broadcast));
+                    return;
+                }
+
+                Session.Network.EnqueueSend(new GameMessageSystemChat($"{player.Name}'s account has been unsquelched.", ChatMessageType.Broadcast));
+            }
+
+            Session.Network.EnqueueSend(new GameEventSetSquelchDB(Session, Squelches));
+        }
+
+        public void HandleActionModifyGlobalSquelch(bool squelch, ChatMessageType messageType)
+        {
+            //Console.WriteLine($"{Name}.HandleActionModifyGlobalSquelch({squelch}, {messageType})");
         }
     }
 }

@@ -94,9 +94,15 @@ namespace ACE.Server.WorldObjects
             if (weapon == null)
                 return defaultBonusModifier;
 
-            // always aura?
             if (wielder.CombatMode != CombatMode.NonCombat)
-                return (float)(weapon.GetProperty(PropertyFloat.WeaponDefense) ?? defaultBonusModifier) + wielder.EnchantmentManager.GetDefenseMod();
+            {
+                var defenseMod = (float)(weapon.GetProperty(PropertyFloat.WeaponDefense) + weapon.EnchantmentManager.GetDefenseMod() ?? defaultBonusModifier);
+
+                if (weapon.IsEnchantable)
+                    defenseMod += wielder.EnchantmentManager.GetDefenseMod();
+
+                return defenseMod;
+            }
 
             return defaultBonusModifier;
         }
@@ -111,9 +117,15 @@ namespace ACE.Server.WorldObjects
             if (weapon == null)
                 return defaultBonusModifier;
 
-            // always aura?
             if (wielder.CombatMode != CombatMode.NonCombat)
-                return (float)(weapon.GetProperty(PropertyFloat.WeaponOffense) ?? defaultBonusModifier) + wielder.EnchantmentManager.GetAttackMod();
+            {
+                var offenseMod = (float)(weapon.GetProperty(PropertyFloat.WeaponOffense) + weapon.EnchantmentManager.GetAttackMod() ?? defaultBonusModifier);
+
+                if (weapon.IsEnchantable)
+                    offenseMod += wielder.EnchantmentManager.GetAttackMod();
+
+                return offenseMod;
+            }
 
             return defaultBonusModifier;
         }
@@ -136,6 +148,9 @@ namespace ACE.Server.WorldObjects
                 var criticalStrikeMod = GetCriticalStrikeMod(skill);
                 critRateMod += criticalStrikeMod;
             }
+
+            if (wielder is Player player && player.AugmentationCriticalExpertise > 0)
+                critRateMod += player.AugmentationCriticalExpertise * 0.01f;
 
             // 50% cap here, or only in criticalStrikeMod?
             critRateMod = Math.Min(critRateMod, 0.5f);
@@ -177,6 +192,9 @@ namespace ACE.Server.WorldObjects
                 critRateMod += criticalStrikeMod;
             }
 
+            if (wielder is Player player && player.AugmentationCriticalExpertise > 0)
+                critRateMod += player.AugmentationCriticalExpertise * 0.01f;
+
             // 50% cap here, or only in criticalStrikeMod?
             critRateMod = Math.Min(critRateMod, 0.5f);
 
@@ -200,6 +218,9 @@ namespace ACE.Server.WorldObjects
                 var cripplingBlowMod = GetCripplingBlowMod(skill);
                 critDamageMod += cripplingBlowMod;      // additive float?
             }
+
+            if (wielder is Player player && player.AugmentationCriticalPower > 0)
+                critDamageMod += player.AugmentationCriticalPower * 0.03f;
 
             // caps at 6x upstream?
             critDamageMod = Math.Min(critDamageMod, 5.0f);
@@ -245,7 +266,6 @@ namespace ACE.Server.WorldObjects
                 var elementalDamageModType = weapon.GetProperty(PropertyInt.DamageType) ?? (int)DamageType.Undef;
                 if (elementalDamageModType != (int)DamageType.Undef && elementalDamageModType == (int)damageType)
                 {
-                    // TODO: Add EnchantmentManager buff/debuff from Spirit Drinker/Loather
                     var casterElementalDmgMod = (float)(weapon.GetProperty(PropertyFloat.ElementalDamageMod) ?? modifier) + wielder.EnchantmentManager.GetElementalDamageMod();
                     if (casterElementalDmgMod > modifier)
                     {
@@ -339,6 +359,8 @@ namespace ACE.Server.WorldObjects
                     return ImbuedEffectType.AcidRending;
                 case DamageType.Electric:
                     return ImbuedEffectType.ElectricRending;
+                case DamageType.Nether:
+                    return ImbuedEffectType.Undef;  // none?
                 default:
                     Console.WriteLine($"GetRendDamageType({damageType}) unexpected damage type");
                     return ImbuedEffectType.Undef;
@@ -557,6 +579,8 @@ namespace ACE.Server.WorldObjects
                 case Skill.LightWeapons:
                 case Skill.HeavyWeapons:
                 case Skill.FinesseWeapons:
+                case Skill.DualWield:
+                case Skill.TwoHandedCombat:
 
                 // legacy
                 case Skill.Axe:

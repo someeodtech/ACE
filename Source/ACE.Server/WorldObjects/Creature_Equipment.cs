@@ -76,7 +76,7 @@ namespace ACE.Server.WorldObjects
         /// </summary>
         public List<WorldObject> GetEquippedArmor(EquipMask validLocations)
         {
-            return EquippedObjects.Values.Where(i => (i.ValidLocations & EquipMask.Armor) != 0 && (i.ValidLocations & validLocations) != 0).ToList();
+            return EquippedObjects.Values.Where(i => (i.ValidLocations & EquipMask.ArmorExclusive) != 0 && (i.ValidLocations & validLocations) != 0).ToList();
         }
 
         /// <summary>
@@ -261,7 +261,7 @@ namespace ACE.Server.WorldObjects
         }
 
 
-        private bool IsInChildLocation(WorldObject item)
+        protected bool IsInChildLocation(WorldObject item)
         {
             if (item.CurrentWieldedLocation == null)
                 return false;
@@ -356,6 +356,16 @@ namespace ACE.Server.WorldObjects
         }
 
         /// <summary>
+        /// Removes an existing object from Children if exists,
+        /// and resets to new Child position
+        /// </summary>
+        public void ResetChild(WorldObject item)
+        {
+            Children.Remove(Children.Find(s => s.Guid == item.Guid.Full));
+            TrySetChild(item);
+        }
+
+        /// <summary>
         /// This is called prior to SendSelf to load up the child list for wielded items that are held in a hand.
         /// </summary>
         private void SetChildren()
@@ -372,6 +382,8 @@ namespace ACE.Server.WorldObjects
 
         public void GenerateWieldList()
         {
+            var attackable = Attackable ?? false;
+
             foreach (var item in Biota.BiotaPropertiesCreateList.Where(x => x.DestinationType == (int) DestinationType.Wield || x.DestinationType == (int) DestinationType.WieldTreasure))
             {
                 var wo = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId);
@@ -384,8 +396,8 @@ namespace ACE.Server.WorldObjects
                     if (item.Shade > 0)
                         wo.Shade = item.Shade;
 
-                    //if (wo.ValidLocations != null)
-                        //TryEquipObject(wo, (int) wo.ValidLocations.Value);
+                    if (!attackable && wo.ValidLocations != null)
+                        TryEquipObject(wo, (EquipMask)wo.ValidLocations);
 
                     TryAddToInventory(wo);
                 }
@@ -415,65 +427,10 @@ namespace ACE.Server.WorldObjects
 
             var table = new TreasureWieldedTable(WieldedTreasure);
 
-            foreach (var set in table.Sets)
-                GenerateWieldedTreasureSet(set);
-        }
+            var wieldedTreasure = GenerateWieldedTreasureSets(table);
 
-        public void GenerateWieldedTreasureSet(TreasureWieldedSet set)
-        {
-            var rng = ThreadSafeRandom.Next(0.0f, set.TotalProbability);
-            var probability = 0.0f;
-
-            foreach (var item in set.Items)
-            {
-                probability += item.Item.Probability;
-                if (rng > probability) continue;
-
-                // item roll successful, spawn item in creature inventory
-                var success = CreateWieldedTreasure(item.Item);
-                if (!success) continue;
-
-                // traverse into possible subsets
-                if (item.Subset != null)
-                    GenerateWieldedTreasureSet(item.Subset);
-
-                break;
-            }
-        }
-
-        public bool CreateWieldedTreasure(TreasureWielded item)
-        {
-            var wo = WorldObjectFactory.CreateNewWorldObject(item.WeenieClassId);
-            if (wo == null) return false;
-
-            if (item.PaletteId > 0)
-                wo.PaletteTemplate = (int)item.PaletteId;
-
-            if (item.Shade > 0)
-                wo.Shade = item.Shade;
-
-            if (item.StackSize > 0)
-            {
-                // fix lugians only having 1 rock?
-                if (wo.Name.Equals("Rock") && item.StackSize == 1 && item.StackSizeVariance == 0)
-                {
-                    item.StackSize = 10;
-                    item.StackSizeVariance = 0.1f;
-                }
-
-                var stackSize = item.StackSize;
-
-                var hasVariance = item.StackSizeVariance > 0;
-                if (hasVariance)
-                {
-                    var minStack = (int)Math.Round(item.StackSize * item.StackSizeVariance);
-                    var maxStack = item.StackSize;
-                    stackSize = ThreadSafeRandom.Next(minStack, maxStack);
-                }
-                wo.StackSize = (ushort)stackSize;
-            }
-
-            return TryAddToInventory(wo);
+            foreach (var item in wieldedTreasure)
+                TryAddToInventory(item);
         }
     }
 }
